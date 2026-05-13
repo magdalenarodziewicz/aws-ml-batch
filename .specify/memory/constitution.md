@@ -1,57 +1,84 @@
-# AWS ML Batch Pipeline Constitution
+# SaleScore ML Platform — Constitution
 
 ## Core Principles
 
-### I. Modular ML Pipeline
-Each ML model type (classification, regression, clustering) is an independent, swappable module.
-Modules share a common interface: `fit(df) → model`, `predict(df) → df_with_predictions`.
-No business logic inside model modules — only ML logic.
+### I. Platform-First, Model-Second
+This is a reusable ML platform, not a collection of pipelines.
+All infrastructure, tooling, and orchestration is shared across models.
+A new model requires only a config file and a training script — not new infrastructure.
 
-### II. Data Contract First
-All inputs and outputs are defined as explicit schemas (Parquet columns + dtypes) before implementation.
-Mocked data must be schema-compatible with production data.
-Predictions output = original input columns + `prediction` column, saved to S3 as Parquet.
+### II. Model Configurability via YAML (NON-NEGOTIABLE)
+Every model is described by a single `model_config.yaml`:
+model name, feature list, target column, algorithm family, hyperparameters, schedule, input sources.
+No business logic is hardcoded — it lives in config.
+Adding a new model to the portfolio = adding a config file + training script.
 
-### III. Monthly Batch — Idempotency (NON-NEGOTIABLE)
-Every pipeline run must be idempotent: re-running for the same month produces identical results.
-Outputs are partitioned by `run_date=YYYY-MM` on S3.
-No state is stored outside S3.
+### III. Three-Environment Promotion Flow
+**prototype** → experimentation, notebooks, MLflow tracking, no production data
+**dev** → scripts, integration tests, CI, staging data, MLflow model registration
+**prod** → scheduled batch scoring, registered+approved models only, real client data
 
-### IV. Test with Mocks, Deploy with Real
-All development uses mocked Parquet data stored locally or in a dev S3 bucket.
-Production reads from external Parquet source via S3.
-Mock and real data share the same schema — no code changes between environments.
+Promotion between environments requires explicit approval (MLflow model stage transition: Staging → Production).
+No model runs in prod unless it passed dev validation and was promoted via MLflow.
 
-### V. Observability
-Every pipeline run logs: start time, input row count, model used, output row count, S3 output path, duration.
-Errors are surfaced immediately and halt the pipeline — no silent failures.
+### IV. MLflow as Single Source of Truth for Models
+All experiments tracked in MLflow (prototype env).
+All models registered in MLflow Model Registry.
+Batch scoring jobs load models by name + stage (`Production`) — never by file path.
+Model versioning, lineage, and metrics live in MLflow, not in filenames or S3 keys.
 
-## AWS Constraints
+### V. Separation of Concerns
+Feature engineering (Glue PySpark) is independent from model training (AWS Batch / SageMaker).
+Training is independent from inference/scoring.
+Each stage has its own Step Functions state machine and can be triggered independently.
 
-- **Compute**: AWS Batch (or SageMaker Processing Jobs) for monthly runs
-- **Storage**: S3 for input data, models, and output predictions
-- **Orchestration**: Step Functions or EventBridge Scheduler for monthly trigger
-- **Data Prep**: AWS Glue Job joins `client_aggregates` + `client_transactions` → feature-ready Parquet
-- **Dependencies**: managed via Docker container or SageMaker-managed environment
-- **IAM**: least-privilege roles — pipeline reads input bucket, writes output bucket only
+### VI. IaC — Everything in CDK Python (NON-NEGOTIABLE)
+All AWS resources are defined in AWS CDK (Python).
+CDK stacks are parameterized by environment (`prototype` / `dev` / `prod`).
+No manual console changes. `cdk diff` required before every `cdk deploy`.
+Stacks: `StorageStack`, `GlueStack`, `TrainingStack`, `MLflowStack`, `ScoringStack`, `OrchestrationStack`.
 
-### VI. Infrastructure as Code (NON-NEGOTIABLE)
-All AWS infrastructure is defined in AWS CDK (Python).
-No manual console changes — every resource must exist in CDK stacks.
-CDK stacks are split by concern: `GlueStack`, `BatchStack`, `OrchestrationStack`, `StorageStack`.
-`cdk diff` before every `cdk deploy` — changes are reviewed, not applied blindly.
+### VII. Minimal Client Configuration
+A new client deploys the platform by providing one config file:
+S3 source paths, model selection, run schedule, environment tag.
+All infrastructure spins up from `cdk deploy` + that config — zero manual steps.
+
+### VIII. Observability
+Every pipeline stage logs structured JSON: stage, model_name, model_version, run_date,
+input_rows, output_rows, duration_seconds, status, error (if any).
+No silent failures. Failed stages halt the state machine and emit an alert.
+
+## AWS Architecture
+
+- **Storage**: S3 (raw → features → predictions, per environment prefix)
+- **Feature Engineering**: AWS Glue PySpark Jobs (one job per model or shared by model family)
+- **Training**: AWS Batch (containerized PySpark/sklearn/xgboost training jobs)
+- **Model Registry**: MLflow (hosted on ECS Fargate, backed by RDS PostgreSQL + S3 artifact store)
+- **Scoring**: AWS Batch (monthly batch, loads model from MLflow by name+stage)
+- **Orchestration**: AWS Step Functions (separate state machines: feature_eng, training, scoring)
+- **Scheduling**: Amazon EventBridge Scheduler (monthly scoring trigger per model)
+- **IaC**: AWS CDK v2 (Python)
+- **Containers**: Amazon ECR (one image per model family: classification, regression, clustering)
+
+## Model Portfolio (v1 scope — SMB Sales)
+
+All models share the same platform infrastructure, differ only in config + training script.
+- Churn prediction (classification) ← first to implement
+- Customer Lifetime Value (regression)
+- Lead scoring (classification)
+- Sales forecasting (regression)
+- Payment default risk (classification)
 
 ## Development Workflow
 
-1. Define schema → 2. Write mocked data → 3. Implement Glue job → 4. Implement model module → 5. Test locally → 6. Deploy via CDK
-
-All code changes require passing unit tests before deployment.
-Infrastructure changes (CDK/CloudFormation) are reviewed before apply.
+prototype: notebook experiments → MLflow tracking → register model as "Staging"
+dev: scripted training → integration tests → promote model to "Production" in MLflow
+prod: EventBridge triggers monthly scoring → Step Functions → Glue → Batch → S3 output
 
 ## Governance
 
-This constitution supersedes all other practices.
-Amendments require updating this document and communicating to all contributors.
-All implementation decisions are evaluated against these principles first.
+Constitution supersedes all other practices.
+All implementation decisions are evaluated against these principles.
+Amendments require updating this document + PR review.
 
-**Version**: 1.0.0 | **Ratified**: 2026-05-13 | **Last Amended**: 2026-05-13
+**Version**: 2.0.0 | **Ratified**: 2026-05-13 | **Last Amended**: 2026-05-13

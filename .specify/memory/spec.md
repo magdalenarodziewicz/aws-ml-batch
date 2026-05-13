@@ -1,110 +1,159 @@
-# Feature Specification: Monthly Customer Churn Batch ML Pipeline
+# Platform Specification: SaleScore ML Platform
 
-**Feature Branch**: `001-churn-classification-pipeline`
-
+**Version**: 2.0.0
 **Created**: 2026-05-13
-
 **Status**: Draft
-
-**Input**: Monthly batch ML pipeline — customer churn classification on AWS
 
 ---
 
-## User Scenarios & Testing *(mandatory)*
+## What We Are Building
 
-### User Story 1 — Monthly Churn Predictions Run (Priority: P1)
+A **self-deployable MLOps platform** for small and medium sales businesses.
+A client points it at their data sources, selects models from the portfolio, and gets monthly churn/LTV/lead scores in S3.
+The platform handles everything: feature engineering, training, model registry, batch scoring, infrastructure.
 
-A data analyst triggers (or the scheduler triggers) the monthly pipeline.
-Raw data lands in S3. Glue joins the tables. The classification model scores every customer.
-Output Parquet lands in S3 with original features + `churn_predicted` column.
+**Client onboarding flow**:
+1. Clone repo
+2. Fill in `client_config.yaml` (S3 paths, model selection, schedule)
+3. `cdk deploy --all --context env=prod`
+4. Wait for first monthly scores
 
-**Why this priority**: Core business value — without this, nothing else matters.
+---
 
-**Independent Test**: Can be tested end-to-end with mocked Parquet files locally;
-delivers a complete prediction file as output.
+## User Scenarios & Testing
+
+### User Story 1 — Monthly Batch Scoring (Priority: P1)
+
+On the 2nd of each month, EventBridge triggers the scoring pipeline for each active model.
+Glue reads raw client data, joins and engineers features, writes to S3.
+Batch job loads the `Production`-stage model from MLflow, scores all customers, writes predictions to S3.
 
 **Acceptance Scenarios**:
 
-1. **Given** `client_aggregates` and `client_transactions` Parquet files exist in S3 input bucket,
-   **When** the pipeline runs for month `2026-05`,
-   **Then** a Parquet file is written to `s3://output-bucket/predictions/run_date=2026-05/churn_predictions.parquet`
-   containing all original columns + `churn_predicted` (0 or 1).
+1. **Given** raw Parquet files exist in S3 and a `Production` model is registered in MLflow,
+   **When** EventBridge triggers the scoring state machine on the 2nd of the month,
+   **Then** predictions Parquet lands at `s3://{output_bucket}/predictions/{model_name}/run_date={YYYY-MM}/` within 30 minutes.
 
 2. **Given** the pipeline is re-run for the same month,
-   **When** output already exists,
-   **Then** the file is overwritten with identical content (idempotent).
+   **Then** output is overwritten with identical content (idempotent).
 
-3. **Given** input data contains 10 000 rows,
-   **When** the pipeline completes,
-   **Then** output contains exactly 10 000 rows (no row loss).
+3. **Given** no `Production` model exists in MLflow for a given model,
+   **Then** the state machine fails with a clear error — no silent scoring with a wrong model.
 
 ---
 
-### User Story 2 — Data Preparation via Glue (Priority: P1)
+### User Story 2 — Model Training & Registration (Priority: P1)
 
-Glue job reads two raw Parquet tables, joins them on `customer_id`,
-applies feature engineering, and writes a single feature-ready Parquet file to S3.
+A data scientist runs the training pipeline in `dev`.
+The training job reads features from S3, trains the model, logs metrics to MLflow, and registers the model as `Staging`.
+After review, the model is promoted to `Production` — either manually via MLflow UI or via a promotion script.
 
-**Why this priority**: No features = no model. Glue prep is a hard dependency for scoring.
+**Acceptance Scenarios**:
 
-**Independent Test**: Glue job can be run standalone with mocked inputs;
-output schema is verifiable without running the ML model.
+1. **Given** feature data exists in S3 (dev prefix),
+   **When** training job runs,
+   **Then** model is registered in MLflow with metrics (accuracy, AUC, F1), feature importance, and artifact path.
+
+2. **Given** a `Staging` model in MLflow,
+   **When** `promote_model.py --model churn --version 3` is run,
+   **Then** model transitions to `Production` stage and previous `Production` is archived.
+
+---
+
+### User Story 3 — Feature Engineering (Priority: P1)
+
+Glue PySpark job reads raw tables, joins them, engineers features, writes feature Parquet.
+Feature job is model-specific (config-driven) but runs on shared Glue infrastructure.
 
 **Acceptance Scenarios**:
 
 1. **Given** `client_aggregates` and `client_transactions` in S3,
-   **When** Glue job runs,
-   **Then** output Parquet has the expected feature schema (see Requirements) with no nulls in key columns.
+   **When** Glue feature job for churn model runs,
+   **Then** feature Parquet is written to `s3://{features_bucket}/features/churn/run_date={YYYY-MM}/` with the expected schema.
 
-2. **Given** a customer appears in `client_aggregates` but not in `client_transactions`,
-   **When** Glue job runs,
-   **Then** that customer is included with transaction features filled as 0 (left join semantics).
+2. **Given** a customer exists in `client_aggregates` but has no rows in `client_transactions`,
+   **Then** customer is included with transaction features as 0 (left join semantics).
 
 ---
 
-### User Story 3 — IaC Deployment via CDK (Priority: P2)
+### User Story 4 — New Model Onboarding (Priority: P2)
 
-A developer runs `cdk deploy` and the entire pipeline infrastructure is provisioned:
-S3 buckets, Glue job, AWS Batch job definition, Step Functions state machine, EventBridge scheduler.
-
-**Why this priority**: Reproducibility — environment must be recreatable from code.
-
-**Independent Test**: `cdk synth` produces a valid CloudFormation template without manual resources.
+Adding a new model to the portfolio requires:
+- A `model_config.yaml` file
+- A training script
+- A Glue feature engineering script
+No infrastructure changes required.
 
 **Acceptance Scenarios**:
 
-1. **Given** AWS credentials and CDK bootstrapped,
-   **When** `cdk deploy --all` is run,
-   **Then** all stacks deploy successfully with zero manual console steps.
+1. **Given** `configs/lead_scoring/model_config.yaml` and `training/lead_scoring/train.py` exist,
+   **When** the training pipeline is triggered for `lead_scoring`,
+   **Then** it runs end-to-end using shared infrastructure (Glue, Batch, MLflow, Step Functions).
 
-2. **Given** an existing deployment,
-   **When** a CDK stack is modified,
-   **Then** `cdk diff` shows only the expected delta before `cdk deploy`.
+---
+
+### User Story 5 — Client Deployment (Priority: P2)
+
+A new client deploys the platform to their AWS account with minimal config.
+
+**Acceptance Scenarios**:
+
+1. **Given** a new AWS account with CDK bootstrapped,
+   **When** client fills `client_config.yaml` and runs `cdk deploy --all --context env=prod`,
+   **Then** full infrastructure is provisioned: S3 buckets, Glue jobs, Batch queues, MLflow server, Step Functions, EventBridge rules.
+
+2. **Given** the platform is deployed,
+   **When** client uploads their data to the configured S3 input path,
+   **Then** the first scheduled run executes without any additional configuration.
 
 ---
 
 ### Edge Cases
 
-- What if `client_aggregates` has duplicate `customer_id` rows? → Glue deduplicates (keep latest by `snapshot_date`).
-- What if the input bucket is empty? → Pipeline fails fast with a clear error log, no partial output.
-- What if the model file is missing from S3? → Batch job fails with explicit error, does not fall back silently.
-- What if a feature column has >10% nulls? → Log a warning but continue; document as known data quality issue.
+- What if MLflow server is unreachable during scoring? → Batch job retries 3x, then fails the state machine.
+- What if input data schema changes? → Glue job fails schema validation and halts — no partial output.
+- What if a model degrades in prod? → MLflow metrics are logged per run; model can be rolled back by promoting previous version.
+- What if `cdk deploy` fails mid-stack? → CDK rollback restores previous state; no partial infrastructure.
 
 ---
 
-## Requirements *(mandatory)*
+## Requirements
 
 ### Functional Requirements
 
-- **FR-001**: Glue job MUST join `client_aggregates` and `client_transactions` on `customer_id` (left join, aggregates as left table).
-- **FR-002**: Glue job MUST output a single Parquet file with the feature schema defined below.
-- **FR-003**: ML module MUST load a pre-trained scikit-learn classification model from S3.
-- **FR-004**: ML module MUST output a Parquet file = all input feature columns + `churn_predicted` (int, 0 or 1) + `churn_probability` (float, 0.0–1.0).
-- **FR-005**: Output MUST be partitioned on S3 as `predictions/run_date=YYYY-MM/`.
-- **FR-006**: Pipeline MUST be orchestrated by AWS Step Functions triggered monthly by EventBridge Scheduler.
-- **FR-007**: All infrastructure MUST be defined in AWS CDK (Python), split across `StorageStack`, `GlueStack`, `BatchStack`, `OrchestrationStack`.
-- **FR-008**: Pipeline MUST be idempotent — re-running for the same `run_date` overwrites output.
-- **FR-009**: Every run MUST emit structured logs: `run_date`, `input_rows`, `output_rows`, `model_version`, `duration_seconds`, `status`.
+**Platform**
+- **FR-001**: Platform MUST support multiple simultaneous models from the portfolio, each with independent schedule and config.
+- **FR-002**: Adding a new model MUST require only a config YAML + training script — no infrastructure code changes.
+- **FR-003**: All models MUST be versioned and tracked in MLflow Model Registry.
+- **FR-004**: Scoring jobs MUST load models by MLflow model name + stage (`Production`) — never by S3 path.
+- **FR-005**: Platform MUST support three environments: `prototype`, `dev`, `prod`, parameterized via CDK context.
+
+**Feature Engineering**
+- **FR-006**: Feature engineering MUST run as AWS Glue PySpark job.
+- **FR-007**: Glue job MUST join `client_aggregates` + `client_transactions` on `customer_id` (left join).
+- **FR-008**: Feature schema MUST be validated before writing output — job fails on schema mismatch.
+
+**Training**
+- **FR-009**: Training MUST run as containerized job on AWS Batch.
+- **FR-010**: Training job MUST log metrics, parameters, and model artifact to MLflow.
+- **FR-011**: Trained model MUST be registered in MLflow as `Staging` — never directly as `Production`.
+
+**Scoring**
+- **FR-012**: Scoring MUST run as containerized job on AWS Batch, triggered monthly by Step Functions.
+- **FR-013**: Output MUST be Parquet: all feature columns + `prediction` column + `prediction_probability` column.
+- **FR-014**: Output MUST be written to `s3://{output_bucket}/predictions/{model_name}/run_date={YYYY-MM}/`.
+- **FR-015**: Pipeline MUST be idempotent — re-run overwrites output for the same `run_date`.
+
+**IaC**
+- **FR-016**: ALL infrastructure MUST be defined in AWS CDK v2 (Python).
+- **FR-017**: CDK stacks MUST be parameterized by environment (`prototype`/`dev`/`prod`).
+- **FR-018**: Client deployment MUST require only `client_config.yaml` + `cdk deploy --all`.
+
+**Observability**
+- **FR-019**: Every pipeline stage MUST emit structured JSON logs with: stage, model_name, model_version, run_date, input_rows, output_rows, duration_seconds, status.
+- **FR-020**: Failed stages MUST halt the Step Functions state machine and send an alert (SNS).
+
+---
 
 ### Data Schema
 
@@ -116,67 +165,97 @@ S3 buckets, Glue job, AWS Batch job definition, Step Functions state machine, Ev
 | `age` | int | Customer age |
 | `tenure_months` | int | Months since first contract |
 | `contract_type` | string | `monthly` / `annual` / `two_year` |
-| `monthly_charges` | float | Current monthly charge (PLN) |
+| `monthly_charges` | float | Current monthly charge |
 | `total_charges` | float | Cumulative charges to date |
 | `num_products` | int | Number of active products |
 | `support_tickets_6m` | int | Support tickets raised in last 6 months |
 | `payment_method` | string | `card` / `transfer` / `autopay` |
-| `has_churned` | int | Ground truth label: 1 = churned (for training only; nullable in scoring) |
+| `has_churned` | int | Ground truth label (nullable — absent in scoring) |
 
 #### Input: `client_transactions` (Parquet)
 | Column | Type | Description |
 |---|---|---|
-| `customer_id` | string | Unique customer identifier |
-| `transaction_date` | date | Date of transaction |
-| `transaction_amount` | float | Transaction value (PLN) |
+| `customer_id` | string | |
+| `transaction_date` | date | |
+| `transaction_amount` | float | |
 | `transaction_type` | string | `payment` / `refund` / `adjustment` |
 | `channel` | string | `online` / `app` / `branch` |
 
-#### Glue Output: `features` (Parquet) — joined + engineered
+#### Glue Output: `features` (Parquet)
 | Column | Type | Description |
 |---|---|---|
 | `customer_id` | string | |
-| `age` | int | From aggregates |
-| `tenure_months` | int | From aggregates |
-| `contract_type_encoded` | int | Label-encoded contract type |
+| `age` | int | |
+| `tenure_months` | int | |
+| `contract_type_encoded` | int | Label-encoded |
 | `monthly_charges` | float | |
 | `total_charges` | float | |
 | `num_products` | int | |
 | `support_tickets_6m` | int | |
-| `payment_method_encoded` | int | Label-encoded payment method |
-| `tx_count_3m` | int | Transaction count last 3 months |
-| `tx_count_6m` | int | Transaction count last 6 months |
-| `avg_tx_amount` | float | Average transaction amount (all time) |
-| `days_since_last_tx` | int | Days between snapshot_date and last transaction |
+| `payment_method_encoded` | int | Label-encoded |
+| `tx_count_3m` | int | Transactions in last 3 months |
+| `tx_count_6m` | int | Transactions in last 6 months |
+| `avg_tx_amount` | float | Average transaction value |
+| `days_since_last_tx` | int | Days to snapshot_date |
 | `total_spend_6m` | float | Sum of payments last 6 months |
 | `refund_rate` | float | refunds / total transactions |
 
-#### Output: `predictions` (Parquet)
-All columns from `features` + `churn_predicted` (int) + `churn_probability` (float)
-
-### Key Entities
-
-- **Customer**: identified by `customer_id`, appears in both input tables.
-- **Pipeline Run**: identified by `run_date` (YYYY-MM), produces one output partition.
-- **Model**: versioned scikit-learn artifact stored in S3 (`models/churn/v{N}/model.pkl`).
+#### Scoring Output: `predictions` (Parquet)
+All `features` columns + `prediction` (int, 0/1) + `prediction_probability` (float)
 
 ---
 
-## Success Criteria *(mandatory)*
+### Model Portfolio (v1)
 
-- **SC-001**: Pipeline completes end-to-end (Glue + Batch) in under 30 minutes for 1M rows.
-- **SC-002**: Output row count equals input row count (zero row loss).
-- **SC-003**: `cdk deploy --all` provisions environment from scratch in a new AWS account.
-- **SC-004**: All unit tests pass locally before any AWS deployment.
-- **SC-005**: Re-running pipeline for same `run_date` produces byte-identical output.
+| Model | Type | Target Column | Primary Metric |
+|---|---|---|---|
+| `churn` | Classification | `has_churned` | AUC-ROC |
+| `ltv` | Regression | `lifetime_value` | RMSE |
+| `lead_scoring` | Classification | `converted` | F1 |
+| `sales_forecast` | Regression | `sales_next_month` | MAE |
+| `payment_default` | Classification | `defaulted` | Precision@K |
+
+---
+
+### `model_config.yaml` Structure (per model)
+
+```yaml
+model_name: churn
+model_type: classification          # classification | regression | clustering
+algorithm: xgboost                  # xgboost | random_forest | logistic_regression
+schedule: "0 6 2 * *"              # cron: 2nd of every month at 06:00 UTC
+input_sources:
+  aggregates: s3://{raw_bucket}/client_aggregates/
+  transactions: s3://{raw_bucket}/client_transactions/
+features_output: s3://{features_bucket}/features/churn/
+predictions_output: s3://{output_bucket}/predictions/churn/
+target_column: has_churned
+hyperparameters:
+  n_estimators: 300
+  max_depth: 6
+  learning_rate: 0.05
+mlflow:
+  experiment_name: churn_v1
+  registered_model_name: churn_classifier
+```
+
+---
+
+## Success Criteria
+
+- **SC-001**: Full end-to-end pipeline (feature eng → training → scoring) runs in under 45 minutes for 1M rows.
+- **SC-002**: `cdk deploy --all` provisions a complete environment from scratch in a new AWS account.
+- **SC-003**: Adding a new model to the portfolio requires zero infrastructure code changes.
+- **SC-004**: All pipeline stages are idempotent — re-running produces identical output.
+- **SC-005**: MLflow UI shows full lineage: experiment → run → registered model → deployment.
 
 ---
 
 ## Assumptions
 
-- Input data arrives in S3 before the 1st of each month (pipeline runs on the 2nd).
-- Model is pre-trained and stored in S3; training pipeline is out of scope for v1.
-- Feature engineering is deterministic (no random state outside the model).
-- `customer_id` is a stable, non-null identifier in both tables.
-- AWS CDK v2 (Python) is used for all IaC.
-- Development environment uses mocked Parquet files with the same schema as production.
+- Client has an AWS account with CDK bootstrapped.
+- MLflow is self-hosted within the client's AWS account (not managed service).
+- Training is offline batch — no real-time inference in v1.
+- Model training data (with labels) is provided by the client alongside raw scoring data.
+- v1 scope: churn model only; platform designed to support full portfolio without re-engineering.
+- Environments are separate AWS accounts or separate CDK context prefixes within one account.
