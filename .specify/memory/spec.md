@@ -24,14 +24,14 @@ The platform handles everything: feature engineering, training, model registry, 
 
 ### User Story 1 — Monthly Batch Scoring (Priority: P1)
 
-On the 2nd of each month, EventBridge triggers the scoring pipeline for each active model.
+On the configured schedule (weekly/monthly/quarterly — per model), EventBridge triggers the scoring pipeline.
 Glue reads raw client data, joins and engineers features, writes to S3.
 Batch job loads the `Production`-stage model from MLflow, scores all customers, writes predictions to S3.
 
 **Acceptance Scenarios**:
 
 1. **Given** raw Parquet files exist in S3 and a `Production` model is registered in MLflow,
-   **When** EventBridge triggers the scoring state machine on the 2nd of the month,
+   **When** EventBridge triggers the scoring state machine per the model's configured schedule,
    **Then** predictions Parquet lands at `s3://{output_bucket}/predictions/{model_name}/run_date={YYYY-MM}/` within 30 minutes.
 
 2. **Given** the pipeline is re-run for the same month,
@@ -100,7 +100,7 @@ A new client deploys the platform to their AWS account with minimal config.
 
 1. **Given** a new AWS account with CDK bootstrapped,
    **When** client fills `client_config.yaml` and runs `cdk deploy --all --context env=prod`,
-   **Then** full infrastructure is provisioned: S3 buckets, Glue jobs, Batch queues, MLflow server, Step Functions, EventBridge rules.
+   **Then** full infrastructure is provisioned: S3 buckets, Glue jobs, Batch queues, SageMaker Managed MLflow, Step Functions, EventBridge rules (one per model schedule).
 
 2. **Given** the platform is deployed,
    **When** client uploads their data to the configured S3 input path,
@@ -122,7 +122,7 @@ A new client deploys the platform to their AWS account with minimal config.
 ### Functional Requirements
 
 **Platform**
-- **FR-001**: Platform MUST support multiple simultaneous models from the portfolio, each with independent schedule and config.
+- **FR-001**: Platform MUST support multiple simultaneous models from the portfolio, each with independent configurable schedule (cron) and config. Schedule is defined per model in `model_config.yaml` and can be weekly, monthly, quarterly, or any cron expression.
 - **FR-002**: Adding a new model MUST require only a config YAML + training script — no infrastructure code changes.
 - **FR-003**: All models MUST be versioned and tracked in MLflow Model Registry.
 - **FR-004**: Scoring jobs MUST load models by MLflow model name + stage (`Production`) — never by S3 path.
@@ -288,7 +288,7 @@ CDK reads all `configs/*/model_config.yaml` and auto-provisions Glue job + Batch
 ## Assumptions
 
 - Client has an AWS account with CDK bootstrapped.
-- MLflow is self-hosted within the client's AWS account (not managed service).
+- MLflow uses Amazon SageMaker Managed MLflow — no self-hosted infra required. Region availability must be verified before client deployment.
 - Training is offline batch — no real-time inference in v1.
 - Model training data (with labels) is provided by the client alongside raw scoring data.
 - v1 scope: churn model only; platform designed to support full portfolio without re-engineering.

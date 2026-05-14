@@ -53,10 +53,10 @@ No silent failures. Failed stages halt the state machine and emit an alert.
 - **Storage**: S3 (raw → features → predictions, per environment prefix)
 - **Feature Engineering**: AWS Glue PySpark Jobs (one job per model or shared by model family)
 - **Training**: AWS Batch (containerized PySpark/sklearn/xgboost training jobs)
-- **Model Registry**: MLflow (hosted on ECS Fargate, backed by RDS PostgreSQL + S3 artifact store)
-- **Scoring**: AWS Batch (monthly batch, loads model from MLflow by name+stage)
+- **Model Registry**: Amazon SageMaker Managed MLflow (fully managed tracking server, S3 artifact store)
+- **Scoring**: AWS Batch (batch scoring on configurable schedule, loads model from MLflow by name+stage)
 - **Orchestration**: AWS Step Functions (separate state machines: feature_eng, training, scoring)
-- **Scheduling**: Amazon EventBridge Scheduler (monthly scoring trigger per model)
+- **Scheduling**: Amazon EventBridge Scheduler (one rule per model, schedule defined in model_config.yaml — weekly/monthly/quarterly)
 - **IaC**: AWS CDK v2 (Python)
 - **Containers**: Amazon ECR (one image per model family: classification, regression, clustering)
 
