@@ -249,6 +249,8 @@ hyperparameters:
   max_depth: 6
   learning_rate: 0.05
 
+# automl: out of scope for v1 — algorithm and hyperparameters set manually above
+
 mlflow:
   experiment_name: churn_v1
   registered_model_name: churn_classifier
@@ -285,58 +287,12 @@ CDK reads all `configs/*/model_config.yaml` and auto-provisions Glue job + Batch
 
 ---
 
-## AutoML Layer
-
-AutoML is a **one-time model discovery step** — not part of the recurring production pipeline.
-
-### When it runs
-In `prototype` or `dev` environment, triggered manually by a data scientist.
-Goal: find the best algorithm + hyperparameters for a given target column and dataset.
-
-### How it works
-```
-client provides: target_column + model_type + feature data in S3
-      ↓
-AutoML runner (Optuna + MLflow) tries N algorithms in parallel:
-  ├── xgboost       → logs run to MLflow experiment
-  ├── lightgbm      → logs run to MLflow experiment
-  ├── random_forest → logs run to MLflow experiment
-  └── logistic_regression → logs run to MLflow experiment
-      ↓
-selects winner by primary_metric (e.g. roc_auc)
-      ↓
-registers winner as "Staging" in SageMaker MLflow Registry
-      ↓
-data scientist reviews metrics in MLflow UI → promotes to "Production"
-      ↓
-Production model enters regular scoring schedule
-```
-
-### Config flag
-```yaml
-automl: true
-automl_timeout_minutes: 60
-primary_metric: roc_auc         # roc_auc | f1 | rmse | mae
-automl_algorithms:              # optional — default: all supported
-  - xgboost
-  - lightgbm
-  - random_forest
-```
-
-### What AutoML does NOT do
-- Does not replace feature engineering — client still provides `feature_eng.py`
-- Does not run on a schedule — one-time only, triggered manually
-- Does not auto-promote to Production — human approval required
-- Does not auto-retrain — retraining is a separate manual trigger
-
----
-
 ## Assumptions
 
 - Client has an AWS account with CDK bootstrapped.
 - MLflow uses Amazon SageMaker Managed MLflow — no self-hosted infra required. Region availability must be verified before client deployment.
-- Training and AutoML are offline batch — no real-time inference in v1.
+- Training is offline batch — no real-time inference in v1.
 - Model training data (with labels) is provided by the client alongside raw scoring data.
-- AutoML is one-time model discovery; recurring automated retraining is out of scope for v1.
+- Algorithm and hyperparameter selection is fully manual — controlled by the data scientist.
 - v1 scope: churn model only; platform designed to support full portfolio without re-engineering.
 - Environments are separate AWS accounts or separate CDK context prefixes within one account.
