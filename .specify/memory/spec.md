@@ -129,9 +129,11 @@ A new client deploys the platform to their AWS account with minimal config.
 - **FR-005**: Platform MUST support three environments: `prototype`, `dev`, `prod`, parameterized via CDK context.
 
 **Feature Engineering**
-- **FR-006**: Feature engineering MUST run as AWS Glue PySpark job.
-- **FR-007**: Glue job MUST join `client_aggregates` + `client_transactions` on `customer_id` (left join).
-- **FR-008**: Feature schema MUST be validated before writing output — job fails on schema mismatch.
+- **FR-006**: Feature engineering MUST run as AWS Glue PySpark job (one job definition per model, created by CDK from config).
+- **FR-007**: Each model MUST have a dedicated PySpark feature script (`features/{model_name}/feature_eng.py`). The script has full freedom: any joins, window functions, aggregations, custom transformations.
+- **FR-008**: `model_config.yaml` lists all input tables for the model (name + S3 path). Adding a new table requires only a new entry in config + handling in the feature script — zero CDK changes.
+- **FR-009**: All feature scripts MUST import from shared `platform_utils` library (S3 read/write, schema validation, structured logging). No duplicated boilerplate.
+- **FR-010**: Feature schema MUST be validated after script output — job fails on schema mismatch, missing columns, or >20% nulls in key columns.
 
 **Training**
 - **FR-009**: Training MUST run as containerized job on AWS Batch.
@@ -224,20 +226,52 @@ model_name: churn
 model_type: classification          # classification | regression | clustering
 algorithm: xgboost                  # xgboost | random_forest | logistic_regression
 schedule: "0 6 2 * *"              # cron: 2nd of every month at 06:00 UTC
+
+# Elastic input sources — add any new table here, handle it in feature_eng.py
 input_sources:
-  aggregates: s3://{raw_bucket}/client_aggregates/
-  transactions: s3://{raw_bucket}/client_transactions/
+  - name: aggregates
+    path: s3://{raw_bucket}/client_aggregates/
+  - name: transactions
+    path: s3://{raw_bucket}/client_transactions/
+  # new model = new tables added here, e.g.:
+  # - name: contracts
+  #   path: s3://{raw_bucket}/client_contracts/
+
+# Dedicated feature engineering script — full PySpark freedom
+feature_script: features/churn/feature_eng.py
+
 features_output: s3://{features_bucket}/features/churn/
 predictions_output: s3://{output_bucket}/predictions/churn/
 target_column: has_churned
+
 hyperparameters:
   n_estimators: 300
   max_depth: 6
   learning_rate: 0.05
+
 mlflow:
   experiment_name: churn_v1
   registered_model_name: churn_classifier
 ```
+
+### Adding a New Model — Checklist
+
+To add `lead_scoring` (with new table `client_crm`):
+
+```
+configs/
+  lead_scoring/
+    model_config.yaml       ← lists client_aggregates + client_crm
+features/
+  lead_scoring/
+    feature_eng.py          ← PySpark: joins aggregates + crm, engineers features
+training/
+  lead_scoring/
+    train.py                ← sklearn/xgboost training logic
+```
+
+Zero CDK changes. Zero infrastructure changes.
+CDK reads all `configs/*/model_config.yaml` and auto-provisions Glue job + Batch job definition per model.
 
 ---
 
